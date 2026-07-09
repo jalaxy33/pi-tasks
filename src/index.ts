@@ -399,19 +399,28 @@ export default function (pi: ExtensionAPI) {
 
     const isResume = event?.reason === "resume";
 
+    // Clean up old session's backing store before switching
+    if (store.list().length === 0) store.deleteFileIfEmpty();
+
     // Reset session-scoped state for both /new and /resume
     storeUpgraded = false;
     persistedTasksShown = false;
     resetCadenceState(cadence);
     autoClear.reset();
 
-    // Memory mode has no file-backed store to switch — clear explicitly on /new
+    // Memory mode has no file-backed store to swap — clear explicitly on /new
     if (!isResume && taskScope === "memory") {
       store.clearAll();
     }
 
     upgradeStoreIfNeeded(ctx);
     showPersistedTasks(isResume);
+  });
+
+  // session_shutdown fires on /quit, /new, /resume, /fork, /reload.
+  // Clean up empty backing store so no stale .pi/tasks/ directory remains.
+  pi.on("session_shutdown" as any, async () => {
+    if (store.list().length === 0) store.deleteFileIfEmpty();
   });
 
   // Keep latestCtx fresh on every tool execution as well.

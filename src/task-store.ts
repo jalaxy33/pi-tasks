@@ -5,9 +5,9 @@
  * Shared (PI_TASK_LIST_ID set): ~/.pi/tasks/<listId>.json with file locking.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join } from "node:path";
 import type { Task, TaskStatus, TaskStoreData } from "./types.js";
 
 function sortById(a: Task, b: Task): number {
@@ -81,10 +81,15 @@ export class TaskStore {
     if (!listIdOrPath) return;
     const isAbsPath = isAbsolute(listIdOrPath);
     const filePath = isAbsPath ? listIdOrPath : join(TASKS_DIR, `${listIdOrPath}.json`);
-    mkdirSync(dirname(filePath), { recursive: true });
     this.filePath = filePath;
     this.lockPath = filePath + ".lock";
     this.load();
+  }
+
+  /** Create the backing directory lazily (on first write, not on construction). */
+  private ensureDir(): void {
+    if (!this.filePath) return;
+    mkdirSync(dirname(this.filePath), { recursive: true });
   }
 
   /** Read store from disk (file-backed mode only). */
@@ -116,6 +121,7 @@ export class TaskStore {
   /** Execute a mutation with file locking (if file-backed). */
   private withLock<T>(fn: () => T): T {
     if (!this.lockPath) return fn();
+    this.ensureDir();
     acquireLock(this.lockPath);
     try {
       this.load(); // Re-read latest state
@@ -293,11 +299,30 @@ export class TaskStore {
     });
   }
 
-  /** Delete the backing file (if file-backed and empty). */
+  /** Delete the backing file (if file-backed and empty). Also removes empty parent directories. */
   deleteFileIfEmpty(): boolean {
     if (!this.filePath || this.tasks.size > 0) return false;
+    // If a lock file exists, another process may own this store — don't touch it
+    if (this.lockPath && existsSync(this.lockPath)) return false;
     try { unlinkSync(this.filePath); } catch { /* ignore */ }
+    this.cleanupDirs();
     return true;
+  }
+
+  /** Remove empty parent directories after the backing file has been deleted. */
+  private cleanupDirs(): void {
+    if (!this.filePath) return;
+    try {
+      const tasksDir = dirname(this.filePath);
+      // Safety guard: only auto-remove directories under a .pi/tasks/ path.
+      // Custom PI_TASKS paths (e.g. /tmp/foo.json) are left alone.
+      if (basename(tasksDir) !== "tasks") return;
+      const piDir = dirname(tasksDir);
+      if (basename(piDir) !== ".pi") return;
+      // rmdirSync throws ENOTEMPTY if directory has remaining files
+      rmdirSync(tasksDir);
+      try { rmdirSync(piDir); } catch { /* .pi not empty or doesn't exist */ }
+    } catch { /* tasks dir not empty or doesn't exist */ }
   }
 
   /** Remove all completed tasks. */
